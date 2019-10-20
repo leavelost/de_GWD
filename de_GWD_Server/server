@@ -7,16 +7,31 @@ function red()    { echo -e "\033[31m\033[01m $1 \033[0m"; }
 
 
 function preinstall(){
-apt install -y sudo net-tools dnsutils curl rsync ca-certificates unzip git socat build-essential autoconf libtool libpcre3 libpcre3-dev zlib1g zlib1g-dev libatomic-ops-dev libjemalloc-dev expat
+apt install -y sudo net-tools dnsutils curl rsync ca-certificates unzip git socat build-essential autoconf libtool libpcre3 libpcre3-dev zlib1g zlib1g-dev libatomic-ops-dev libjemalloc-dev expat jq
 
 source /etc/profile
 
 echo "Asia/Shanghai" > /etc/timezone
 ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
-export LANG=en_US.UTF-8
-export LANGUAGE=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
+cat > /etc/default/locale << EOF
+LANG=en_US.UTF-8
+LANGUAGE=en_US.UTF-8
+LC_CTYPE="en_US.UTF-8"
+LC_NUMERIC="en_US.UTF-8"
+LC_TIME="en_US.UTF-8"
+LC_COLLATE="en_US.UTF-8"
+LC_MONETARY="en_US.UTF-8"
+LC_MESSAGES="en_US.UTF-8"
+LC_PAPER="en_US.UTF-8"
+LC_NAME="en_US.UTF-8"
+LC_ADDRESS="en_US.UTF-8"
+LC_TELEPHONE="en_US.UTF-8"
+LC_MEASUREMENT="en_US.UTF-8"
+LC_IDENTIFICATION="en_US.UTF-8"
+LC_ALL=en_US.UTF-8
+EOF
+locale-gen en_US.UTF-8
 
 cat > /etc/security/limits.conf << EOF
 * soft nofile 1000000
@@ -33,6 +48,8 @@ sed -i '/ip6/d'  /etc/hosts
 cat > /etc/sysctl.conf << EOF
 vm.overcommit_memory = 1
 fs.file-max = 1000000
+net.nf_conntrack_max = 1000000
+net.netfilter.nf_conntrack_max = 1000000
 fs.inotify.max_user_instances = 8192
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv4.ip_local_port_range = 1024 65535
@@ -88,11 +105,7 @@ DNSSEC=false
 CONDITIONAL_FORWARDING=false
 EOF
 
-curl -L https://install.pi-hole.net | bash /dev/stdin --unattended
-
-systemctl stop dhcpcd
-/lib/systemd/systemd-sysv-install disable dhcpcd
-systemctl mask dhcpcd
+sudo curl -sSL https://raw.githubusercontent.com/pi-hole/pi-hole/master/automated%20install/basic-install.sh | bash /dev/stdin --unattended
 
 sed -i '/PIHOLE_DNS/d'  /etc/pihole/setupVars.conf
 sed -i '/IPV6_ADDRESS=/a\PIHOLE_DNS_4=1.0.0.1' /etc/pihole/setupVars.conf
@@ -108,6 +121,10 @@ pihole restartdns
 
 echo "" > /etc/pihole/adlists.list
 pihole -g
+
+systemctl mask systemd-resolved --now
+
+systemctl mask dhcpcd --now
 }
 
 
@@ -193,9 +210,12 @@ RestartPreventExitStatus=23
 [Install]
 WantedBy=multi-user.target
 EOF
+
 wget -O /etc/vtrui/config.json https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Server/v2wt-server.json
-sed -i '/"id":/c\"id": "'$uuidnum'",'  /etc/vtrui/config.json
-sed -i '/"path":/c\"path": "'$v2path'"'  /etc/vtrui/config.json
+
+jq --arg uuidnum "$uuidnum" '.inbounds[0].settings.clients[0].id=$uuidnum' /etc/vtrui/config.json |\
+jq --arg v2path "$v2path" '.inbounds[0].streamSettings.wsSettings.path=$v2path' > /etc/vtrui/temp.json && mv -f /etc/vtrui/temp.json /etc/vtrui/config.json
+
 systemctl daemon-reload
 systemctl restart vtrui
 systemctl enable vtrui
@@ -377,6 +397,7 @@ http {
   tcp_nodelay         on;
   tcp_nopush          on;
   keepalive_timeout   120;
+  types_hash_max_size 2048;
   server_tokens       off;
 
   gzip                on;
@@ -429,7 +450,7 @@ function makessl(){
 cat > /etc/nginx/conf.d/default.conf << EOF
 server {
     listen 80;
-    server_name $vpsdomain www.$vpsdomain;
+    server_name $vpsdomain;
     root /var/www/html;
     index index.php index.html index.htm;
 }
@@ -439,7 +460,7 @@ systemctl restart nginx
 
 mkdir -p /var/www/ssl
 curl https://get.acme.sh | sh
-~/.acme.sh/acme.sh --issue -d $vpsdomain -d www.$vpsdomain -w /var/www/html
+~/.acme.sh/acme.sh --issue -d $vpsdomain -w /var/www/html
 ~/.acme.sh/acme.sh --installcert -d $vpsdomain \
                --keypath       /var/www/ssl/$vpsdomain.key  \
                --fullchainpath /var/www/ssl/$vpsdomain.key.pem \
@@ -481,13 +502,13 @@ upstream dns-backend { server 127.0.0.1:8053; }
 
 server {
   listen 80;
-  server_name $vpsdomain www.$vpsdomain;
+  server_name $vpsdomain;
   return 301 https://\$server_name\$request_uri;
 }
 
 server {
   listen 443 ssl spdy http2 fastopen=64 reuseport;
-  server_name $vpsdomain www.$vpsdomain;
+  server_name $vpsdomain;
   root /var/www/html;
   index index.php index.html index.htm index.nginx-debian.html;
 
@@ -555,13 +576,13 @@ upstream php-handler {
 
 server {
   listen 80;
-  server_name $vpsdomain www.$vpsdomain;
+  server_name $vpsdomain;
   return 301 https://\$server_name\$request_uri;
 }
 
 server {
   listen 443 ssl spdy http2 fastopen=64 reuseport;
-  server_name $vpsdomain www.$vpsdomain;
+  server_name $vpsdomain;
   root /var/www/html;
   index index.php index.html index.htm index.nginx-debian.html;
 
@@ -722,6 +743,25 @@ EOF
 
 
 function postinstall(){
+cat > /usr/local/bin/autoupdate << "EOF"
+#!/bin/bash
+wget -O ~/update https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Server/server
+
+sed -i '$d' ~/update
+
+echo "updategwd" >>  ~/update
+
+chmod +x ~/update
+~/update
+
+crontab -l > ~/now.cron
+sed -i '/auto/d' ~/now.cron
+crontab ~/now.cron
+rm -rf ~/now.cron
+rm -rf ~/update
+EOF
+chmod +x /usr/local/bin/autoupdate
+
 cat > /usr/local/bin/updateGWD << "EOF"
 #!/bin/bash
 date -s "$(wget -qSO- --max-redirect=0 google.com 2>&1 | grep Date: | cut -d' ' -f5-8)Z"
@@ -731,21 +771,39 @@ rm -rf ~/server
 rm -rf /var/log/*1
 rm -rf /var/log/*2
 rm -rf /var/log/*gz
+
+localver=$(awk 'NR==1' /usr/local/bin/version.php)
+remotever=$(curl -s https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Client/version.php | awk 'NR==1')
+
+if [[ $localver < $remotever ]]; then
+crontab -l > ~/now.cron
+sed -i '/autoupdate/d' ~/now.cron
+echo '30 4 * * *  /usr/local/bin/autoupdate' >> ~/now.cron
+crontab ~/now.cron
+rm -rf ~/now.cron
+fi
 EOF
 chmod +x /usr/local/bin/updateGWD
 /usr/local/bin/updateGWD
 
 crontab -l > now.cron
 if [[ "$(crontab -l | grep 'updateGWD' | awk '{print $6}')" != "/usr/local/bin/updateGWD" ]]; then
-echo '0 */4 * * * /usr/local/bin/updateGWD' >> now.cron
+echo '0 */2 * * * /usr/local/bin/updateGWD' >> now.cron
 fi
 crontab now.cron
 rm -rf now.cron
 
+
+indexpage=$(ls /var/www/html/index.* 2> /dev/null | wc -l)
+
+if [ "$indexpage" = "0" ]; then 
 wget -N https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Server/sample.zip
 unzip sample.zip
 rsync -r ~/sample/* /var/www/html/
 rm -rf ~/sample*
+fi
+
+wget -O /usr/local/bin/version.php https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Client/version.php
 }
 
 
@@ -757,22 +815,43 @@ installgwd(){
     green "=============================="
     read vpsdomain
 
-uuidnum=$(cat /proc/sys/kernel/random/uuid)
-v2path="/$(echo $uuidnum | awk '{print substr($0,length($1)-5)}')"
+cat > /etc/resolv.conf << EOF
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+EOF
 
-systemctl stop systemd-resolved
-systemctl disable systemd-resolved
-systemctl mask systemd-resolved
-
-apt update 
-apt upgrade -y
+if [[ $(cat /etc/os-release | grep VERSION= | cut -d '(' -f2 | cut -d ')' -f1) = "buster" ]]; then
+cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian/ buster main
+deb-src http://deb.debian.org/debian/ buster main
+deb http://security.debian.org/debian-security buster/updates main
+deb-src http://security.debian.org/debian-security buster/updates main
+deb http://deb.debian.org/debian/ buster-updates main
+deb-src http://deb.debian.org/debian/ buster-updates main
+EOF
+elif [[ $(cat /etc/os-release | grep VERSION= | cut -d '(' -f2 | cut -d ')' -f1) = "stretch" ]]; then
+cat > /etc/apt/sources.list << EOF
+deb http://deb.debian.org/debian/ stretch main
+deb-src http://deb.debian.org/debian/ stretch main
+deb http://security.debian.org/debian-security stretch/updates main
+deb-src http://security.debian.org/debian-security stretch/updates main
+deb http://deb.debian.org/debian/ stretch-updates main
+deb-src http://deb.debian.org/debian/ stretch-updates main
+EOF
+fi
+apt update && apt upgrade -y
 
 cd ~
 preinstall
 
+uuidnum=$(cat /proc/sys/kernel/random/uuid)
+v2path="/$(echo $uuidnum | awk '{print substr($0,length($1)-5)}')"
+
 ethernetnum="$(ip --oneline link show up | grep -v "lo" | awk '{print $2}' | cut -d':' -f1 | cut -d'@' -f1)"
 localaddr="$(ip -oneline -family inet address show |  awk '{print $4}' | awk 'END {print}' | cut -d '/' -f1)"
 gatewayaddr="$(route -n |  awk 'NR==3{print $2}')"
+
+installpihole
 
 cat > /etc/network/interfaces << EOF
 source /etc/network/interfaces.d/*
@@ -786,8 +865,6 @@ iface $ethernetnum inet static
   netmask 255.255.255.0
   gateway $gatewayaddr
 EOF
-
-installpihole
 
 installdoh
 
@@ -827,7 +904,7 @@ wget -N https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Server/l
 dpkg -i linux-headers-*.deb
 dpkg -i linux-image-*.deb
 
-cat > ~/bbrkernel/clearkernel <<EOF
+cat > ~/bbrkernel/clearkernel << EOF
 #!/bin/bash
 PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
@@ -909,7 +986,7 @@ sed -i "/local   all             postgres                                trust/c
 /etc/init.d/postgresql restart
 
 green "为PostgreSQL默认用户建立密码"
-passwd postgres
+psql -U postgres -w -c "\password postgres"
 
 apt install -y php7.3 php7.3-fpm php7.3-pgsql php7.3-curl php7.3-dom php7.3-gd php7.3-mbstring php7.3-zip php7.3-bz2 php7.3-ldap php7.3-smbclient php7.3-imap php7.3-gmp php7.3-redis php7.3-imagick php7.3-opcache php7.3-xml php7.3-xmlrpc php7.3-intl php7.3-apcu ffmpeg redis-server
 
@@ -999,7 +1076,7 @@ systemctl enable php7.3-fpm
 
 vpsdomain=$(cd /var/www/ssl/ && ls 2>&1 | grep *crt | cut -d . -f3 --complement)
 
-v2path=$(awk "/path/" /etc/vtrui/config.json | awk 'NR==1{print}' | cut -d '"' -f 4)
+v2path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' /etc/vtrui/config.json)
 
 nginxnextcloudconf
 
@@ -1099,7 +1176,7 @@ changedomain(){
     green "=============================="
     read vpsdomain
 
-v2path=$(awk "/path/" /etc/vtrui/config.json | awk 'NR==1{print}' | cut -d '"' -f 4)
+v2path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' /etc/vtrui/config.json)
 
 rm -rf /var/www/ssl
 
@@ -1140,8 +1217,8 @@ sed -i "$(sed -n -e '/location/=' /etc/nginx/conf.d/default.conf | awk 'END{prin
 
 systemctl restart nginx
 
-sed -i "$(sed -n -e '/"id":/=' /etc/vtrui/config.json | awk 'NR==1{print}')s/.*/"'"id"'": "'"'$nuuid'"'",/" /etc/vtrui/config.json
-sed -i "$(sed -n -e '/"path":/=' /etc/vtrui/config.json | awk 'NR==1{print}')s/.*/"'"path"'": "'"\'$npath'"'"/" /etc/vtrui/config.json
+jq --arg nuuid "$nuuid" '.inbounds[0].settings.clients[0].id=$nuuid' /etc/vtrui/config.json |\
+jq --arg npath "$npath" '.inbounds[0].streamSettings.wsSettings.path=$npath' > /etc/vtrui/temp.json && mv -f /etc/vtrui/temp.json /etc/vtrui/config.json
 
 systemctl restart vtrui
 blue "--------------------------"
@@ -1156,6 +1233,7 @@ changev2rayupstream(){
     green "Y.修改上级跃点 / N.删除上级跃点"
     green "==============================="
     read v2rayupstreamyn
+
 if [[ "$v2rayupstreamyn" = "Y" ]] || [[ "$v2rayupstreamyn" = "y" ]]; then
 sed -i '/"outbounds":/,$d' /etc/vtrui/config.json
 
@@ -1185,8 +1263,7 @@ cat >> /etc/vtrui/config.json << EOF
       "users": [{
         "id": "$upstreamuuid",
         "level": 1,
-        "alterId": 64,
-        "security": "none"
+        "alterId": 32
         }]
       }]},
     "streamSettings": {
@@ -1247,18 +1324,39 @@ blue "-------------------"
 
 
 updategwd(){
-vpsdomain=$(cd /var/www/ssl/ && ls 2>&1 | grep *crt | cut -d . -f3 --complement)
-uuidnum=$(awk "/id/" /etc/vtrui/config.json | awk 'NR==1{print}' | cut -d '"' -f 4)
-v2path=$(awk "/path/" /etc/vtrui/config.json | awk 'NR==1{print}' | cut -d '"' -f 4)
-
 cd ~
 preinstall
+
+vpsdomain=$(cd /var/www/ssl/ && ls 2>&1 | grep *crt | cut -d . -f3 --complement)
+uuidnum=$(jq -r '.inbounds[0].settings.clients[0].id' /etc/vtrui/config.json)
+v2path=$(jq -r '.inbounds[0].streamSettings.wsSettings.path' /etc/vtrui/config.json)
+
+v2uuids=$(jq -r '.inbounds[].settings.clients[].id' /etc/vtrui/config.json)
+
+{
+for v2uuid in $v2uuids; do
+echo '{"id": "'$v2uuid'", "level": 1, "alterId": 32}'
+done
+} > /tmp/v2uuid
 
 installdoh
 
 systemctl stop vtrui
 
 installv2ray
+
+jq 'del(.inbounds[0].settings.clients[])' /etc/vtrui/config.json > /etc/vtrui/temp.json
+
+cat /tmp/v2uuid | while read line
+do
+jq --argjson v2uuid "$line" '.inbounds[0].settings.clients+=[$v2uuid]' /etc/vtrui/temp.json > /etc/vtrui/temp2.json && mv -f /etc/vtrui/temp2.json /etc/vtrui/temp.json
+done
+
+mv -f /etc/vtrui/temp.json /etc/vtrui/config.json
+
+systemctl restart vtrui
+
+rm -rf /tmp/v2uuid
 
 nginxconf
 
@@ -1278,9 +1376,47 @@ blue "-----------------"
 
 
 
+autoupdateGWD(){
+    green "==============================="
+    green "Y.开启自动更新 / N.关闭自动更新"
+    green "==============================="
+    read autoupdateswitch
+
+if [[ "$autoupdateswitch" = "Y" ]] || [[ "$autoupdateswitch" = "y" ]]; then 
+sed -i '/localver=/,$d' /usr/local/bin/updateGWD
+
+cat >> /usr/local/bin/updateGWD << "EOF"
+localver=$(awk 'NR==1' /usr/local/bin/version.php)
+remotever=$(curl -s https://raw.githubusercontent.com/gwdburst/de_GWD/master/de_GWD_Client/version.php | awk 'NR==1')
+
+if [[ $localver < $remotever ]]; then
+crontab -l > ~/now.cron
+sed -i '/autoupdate/d' ~/now.cron
+echo '0 4 * * *  /usr/local/bin/autoupdate' >> ~/now.cron
+crontab ~/now.cron
+rm -rf ~/now.cron
+fi
+EOF
+blue "--------------------"
+blue  "自动更新 开启 [完毕]"
+blue "--------------------"
+
+elif [[ "$autoupdateswitch" = "N" ]] || [[ "$autoupdateswitch" = "n" ]]; then
+sed -i '/localver=/,$d' /usr/local/bin/updateGWD
+blue "--------------------"
+blue  "自动更新 关闭 [完毕]"
+blue "--------------------"
+fi
+}
+
+
+
+
 start_menu(){
 statusgod=$(green "✔︎")
 statusbad=$(red "✘")
+statusnone=$(yellow "-")
+
 
 if [[ $(systemctl is-active vtrui) = "active" ]]; then
     echo "[$statusgod] v2ray     进程正常"
@@ -1317,6 +1453,12 @@ else
     echo "[$statusbad] pihole    进程出错"
 fi
 
+if [[ -d "/var/www/html/nextcloud" ]]; then
+  echo "[$statusgod] nextcloud 已安装"
+else
+  echo "[$statusnone] nextcloud 未安装"
+fi
+
 blue "--------------------------"
 blue  "当前bbr方案：$(echo $(sudo sysctl net.ipv4.tcp_congestion_control) | cut -d ' ' -f3)"
 blue "--------------------------"
@@ -1328,6 +1470,7 @@ blue "--------------------------"
     green "作者：GWDburst             "
     green "网站：GWDburst.github.io   "
     green "=========================="
+    blue  "Version:$(echo $(awk 'NR==1' /usr/local/bin/version.php))"
     echo
     green  "1. 安装de_GWD"
     green  "2. 切换至bbrplus并重启生效（Debian 10 暂不可用）"
@@ -1339,6 +1482,7 @@ blue "--------------------------"
     yellow "8. 设置v2ray 上级跃点"
     yellow "9. 更新Pi-hole"
     yellow "0. 更新de_GWD"
+    red    "00. 开启/关闭自动更新"
     red    "CTRL+C退出"
     echo
     read -p "请输入数字:" num
@@ -1381,6 +1525,10 @@ blue "--------------------------"
     ;;
     0)
     updategwd
+    start_menu
+    ;;
+    00)
+    autoupdateGWD
     start_menu
     ;;
     *)
